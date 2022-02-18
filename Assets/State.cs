@@ -56,6 +56,30 @@ public class State
         }
         return this; // If we're not returning the nextState, then return the same state.
     }
+
+    // Can the NPC see the player, using a simple Line Of Sight calculation?
+    public bool CanSeePlayer()
+    {
+        Vector3 direction = player.position - npc.transform.position; // Provides the vector from the NPC to the player.
+        float angle = Vector3.Angle(direction, npc.transform.forward); // Provide angle of sight.
+
+        // If player is close enough to the NPC AND within the visible viewing angle...
+        if(direction.magnitude < visDist && angle < visAngle)
+        {
+            return true; // NPC CAN see the player.
+        }
+        return false; // NPC CANNOT see the player.
+    }
+
+    public bool CanAttackPlayer()
+    {
+        Vector3 direction = player.position - npc.transform.position; // Provides the vector from the NPC to the player.
+        if(direction.magnitude < shootDist)
+        {
+            return true; // NPC IS close enough to the player to attack.
+        }
+        return false; // NPC IS NOT close enough to the player to attack.
+    }
 }
 
 // Constructor for Idle state.
@@ -74,8 +98,13 @@ public class Idle : State
     }
     public override void Update()
     {
+        if (CanSeePlayer())
+        {
+            nextState = new Pursue(npc, agent, anim, player);
+            stage = EVENT.EXIT; // The next time 'Process' runs, the EXIT stage will run instead, which will then return the nextState.
+        }
         // The only place where Update can break out of itself. Set chance of breaking out at 10%.
-        if (Random.Range(0,100) < 10)
+        else if(Random.Range(0,100) < 10)
         {
             nextState = new Patrol(npc, agent, anim, player);
             stage = EVENT.EXIT; // The next time 'Process' runs, the EXIT stage will run instead, which will then return the nextState.
@@ -103,7 +132,19 @@ public class Patrol : State
 
     public override void Enter()
     {
-        currentIndex = 0; // This will start agent at the first waypoint.
+        float lastDist = Mathf.Infinity; // Store distance between NPC and waypoints.
+
+        // Calculate closest waypoint by looping around each one and calculating the distance between the NPC and each waypoint.
+        for (int i = 0; i < GameEnvironment.Singleton.Checkpoints.Count; i++)
+        {
+            GameObject thisWP = GameEnvironment.Singleton.Checkpoints[i];
+            float distance = Vector3.Distance(npc.transform.position, thisWP.transform.position);
+            if(distance < lastDist)
+            {
+                currentIndex = i - 1; // Need to subtract 1 because in Update, we add 1 to i before setting the destination.
+                lastDist = distance;
+            }
+        }
         anim.SetTrigger("isWalking"); // Start agent walking animation.
         base.Enter();
     }
@@ -121,11 +162,105 @@ public class Patrol : State
 
             agent.SetDestination(GameEnvironment.Singleton.Checkpoints[currentIndex].transform.position); // Set agents destination to position of next waypoint.
         }
+
+        if (CanSeePlayer())
+        {
+            nextState = new Pursue(npc, agent, anim, player);
+            stage = EVENT.EXIT; // The next time 'Process' runs, the EXIT stage will run instead, which will then return the nextState.
+        }
     }
 
     public override void Exit()
     {
         anim.ResetTrigger("isWalking"); // Makes sure that any events queued up for Walking are cleared out.
+        base.Exit();
+    }
+}
+
+public class Pursue : State
+{
+    public Pursue(GameObject _npc, NavMeshAgent _agent, Animator _anim, Transform _player)
+                : base(_npc, _agent, _anim, _player)
+    {
+        name = STATE.PURSUE; // State set to match what NPC is doing.
+        agent.speed = 5; // Speed set to make sure NPC appears to be running.
+        agent.isStopped = false; // Set bool to determine NPC is moving.
+    }
+
+    public override void Enter()
+    {
+        anim.SetTrigger("isRunning"); // Set running trigger to change animation.
+        base.Enter();
+    }
+
+    public override void Update()
+    {
+        agent.SetDestination(player.position);  // Set goal for NPC to reach but navmesh processing might not have taken place, so...
+        if(agent.hasPath)                       // ...check if agent has a path yet.
+        {
+            if (CanAttackPlayer())
+            {
+                nextState = new Attack(npc, agent, anim, player); // If NPC can attack player, set correct nextState.
+                stage = EVENT.EXIT; // Set stage correctly as we are finished with Pursue state.
+            }
+            // If NPC can't see the player, switch back to Patrol state.
+            else if (!CanSeePlayer())
+            {
+                nextState = new Patrol(npc, agent, anim, player); // If NPC can't see player, set correct nextState.
+                stage = EVENT.EXIT; // Set stage correctly as we are finished with Pursue state.
+            }
+        }
+    }
+
+    public override void Exit()
+    {
+        anim.ResetTrigger("isRunning"); // Makes sure that any events queued up for Running are cleared out.
+        base.Exit();
+    }
+}
+
+public class Attack : State
+{
+    float rotationSpeed = 2.0f; // Set speed that NPC will rotate around to face player.
+    AudioSource shoot; // To store the AudioSource component.
+    public Attack(GameObject _npc, NavMeshAgent _agent, Animator _anim, Transform _player)
+                : base(_npc, _agent, _anim, _player)
+    {
+        name = STATE.ATTACK; // Set name to correct state.
+        shoot = _npc.GetComponent<AudioSource>(); // Get AudioSource component for shooting sound.
+    }
+
+    public override void Enter()
+    {
+        anim.SetTrigger("isShooting"); // Set shooting trigger to change animation.
+        agent.isStopped = true; // Stop NPC so he can shoot.
+        shoot.Play(); // Play shooting sound.
+        base.Enter();
+    }
+
+    public override void Update()
+    {
+        // Calculate direction and angle to player.
+        Vector3 direction = player.position - npc.transform.position; // Provides the vector from the NPC to the player.
+        float angle = Vector3.Angle(direction, npc.transform.forward); // Provide angle of sight.
+        direction.y = 0; // Prevent character from tilting.
+
+        // Rotate NPC to always face the player that he's attacking.
+        npc.transform.rotation = Quaternion.Slerp(npc.transform.rotation,
+                                            Quaternion.LookRotation(direction),
+                                            Time.deltaTime * rotationSpeed);
+
+        if(!CanAttackPlayer())
+        {
+            nextState = new Idle(npc, agent, anim, player); // If NPC can't attack player, set correct nextState.
+            stage = EVENT.EXIT; // Set stage correctly as we are finished with Attack state.
+        }
+    }
+
+    public override void Exit()
+    {
+        anim.ResetTrigger("isShooting"); // Makes sure that any events queued up for Shooting are cleared out.
+        shoot.Stop(); // Stop shooting sound.
         base.Exit();
     }
 }
